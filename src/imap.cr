@@ -1,12 +1,16 @@
-require "./imap/*"
 require "openssl"
 require "logger"
 
+require "./imap/*"
+
 module Imap
   class Client
+    CAPS_UTF8 = ImmutableSet.new("UTF8=ALL", "UTF8=ONLY", "UTF8=ACCEPT")
+
     @caps : Set(String)
     @socket : TCPSocket | OpenSSL::SSL::Socket::Client | Nil = nil
     @logger : Logger
+    @idling = false
 
     def initialize(host = "imap.gmail.com", port = 993, username = "", password = "", loglevel = Logger::ERROR)
       @logger = Logger.new(STDERR)
@@ -16,11 +20,13 @@ module Imap
       tls_socket = OpenSSL::SSL::Socket::Client.new(@socket.as(TCPSocket), sync_close: true, hostname: host)
       tls_socket.sync = false
       @socket = tls_socket
+
       login(username, password)
-      # list headers
-      # process_mail_headers(command("tag FETCH 1:#{count} (BODY[HEADER])"))
 
       @caps = capability
+      if CAPS_UTF8.intersects? @caps
+        command("ENABLE", "UTF8=ACCEPT")
+      end
     end
 
     private def socket
@@ -31,22 +37,20 @@ module Imap
       end
     end
 
-    private def command(command : String, *parameters, &block : String -> Bool)
-      command_and_parameter = case command
-        when "DONE"
-          command
-        else
-          "tag #{command}"
-      end
+    private def send(data : String)
+      socket << data << "\r\n"
+      socket.flush
+      @logger.debug "Sent: #{data}"
+    end
 
+    private def command(command : String, *parameters, &block : String -> Bool)
+      command_and_parameter = "tag #{command}"
       if parameters.size > 0
         params = parameters.join(" ")
         command_and_parameter += " #{params}"
       end
 
-      socket << command_and_parameter << "\r\n"
-      socket.flush
-      @logger.debug "Sent: #{command_and_parameter}"
+      send command_and_parameter
 
       while (line = socket.gets)
         @logger.debug " Got: #{line}"
@@ -64,7 +68,7 @@ module Imap
           res << line
           next false
         elsif line =~ /^tag (BAD|NO)/
-          raise "Invalid responce \"#{line}\" received."
+          raise "Invalid response \"#{line}\" received."
         else
           res << line
         end
@@ -75,7 +79,7 @@ module Imap
     end
 
     private def login(username, password)
-      command("login", username, password)
+      command("LOGIN", username, password)
     end
 
     # Sends a CAPABILITY command
@@ -92,20 +96,24 @@ module Imap
       spawn do
         command("IDLE") do |line|
           if line =~ /\+ idling/
-            # nothing to do
+            @idling = true
           elsif line =~ /\* (\d+) ([A-Z]+)/
             block.call($2, $1.to_u32)
           else
+            @idling = false
             next false
           end
           true
         end
       end
+
+      Fiber.yield
     end
 
     # Sends a DONE command
-    def done
-      command("DONE")
+    def idle_done
+      raise "IDLE not started" unless @idling
+      send("DONE")
     end
 
     # Sends a SELECT command to select a +mailbox+ so that messages
@@ -134,7 +142,7 @@ module Imap
 
 
     # Returns an array of mailbox names
-    def list : Set(String)
+    def list : Array(String)
       mailboxes = [] of String
       res = command(%{LIST "" "*"})
       res.each do |line|
@@ -143,8 +151,7 @@ module Imap
           mailboxes << name[1].to_s if name
         end
       end
-      # TODO: decode MIME encoded UTF-8 strings
-      return Set.new(mailboxes)
+      return mailboxes
     end
 
     # Sends a STATUS command, and returns the status of the indicated
@@ -198,7 +205,7 @@ module Imap
     # Closes the imap connection
     def close
       command("LOGOUT") rescue nil
-      @socket.close
+      @socket.not_nil!.close if @socket
     end
   end
 end

@@ -5,11 +5,10 @@ describe Imap do
 
   it "should count emails in mailbox" do
     imap = Imap::Client.new(host: "imap.gmail.com", port: 993, username: "***", password: "***")
-    mailboxes = imap.get_mailboxes
+    mailboxes = imap.list
     if mailboxes.size > 0
-      mailbox = mailboxes[0]
-      imap.set_mailbox(mailbox)
-      message_count = imap.get_message_count
+      mailbox = mailboxes.first
+      message_count = imap.status(mailbox, ["MESSAGES"])["MESSAGES"]
       puts "There are #{message_count} message in #{mailbox}"
     end
     imap.close
