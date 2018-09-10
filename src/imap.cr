@@ -9,9 +9,8 @@ module Imap
     @logger : Logger
 
     def initialize(host = "imap.gmail.com", port = 993, username = "", password = "", loglevel = Logger::ERROR)
-      @logger = Logger.new(STDOUT)
+      @logger = Logger.new(STDERR)
       @logger.level = loglevel
-      @mailboxes = [] of String
 
       @socket = TCPSocket.new(host, port)
       tls_socket = OpenSSL::SSL::Socket::Client.new(@socket.as(TCPSocket), sync_close: true, hostname: host)
@@ -33,15 +32,24 @@ module Imap
     end
 
     private def command(command : String, *parameters, &block : String -> Bool)
-      command_and_parameter = "tag #{command}"
-      params = parameters.join(" ")
-      command_and_parameter += " #{params}" if params && params.size > 0
-      @logger.info "=====> #{command_and_parameter}"
+      command_and_parameter = case command
+        when "DONE"
+          command
+        else
+          "tag #{command}"
+      end
+
+      if parameters.size > 0
+        params = parameters.join(" ")
+        command_and_parameter += " #{params}"
+      end
 
       socket << command_and_parameter << "\r\n"
       socket.flush
+      @logger.debug "Sent: #{command_and_parameter}"
 
       while (line = socket.gets)
+        @logger.debug " Got: #{line}"
         break unless block.call(line)
       end
     end
@@ -78,12 +86,26 @@ module Imap
 
     # Sends an IDLE command,
     #  raises exception if server doesn't support IDLE
-    def idle
+    def idle(&block : String, UInt32 ->)
       raise "Server doesn't support IDLE" unless @caps.includes?("IDLE")
-      command("IDLE") do |line|
-        puts line
-        true
+
+      spawn do
+        command("IDLE") do |line|
+          if line =~ /\+ idling/
+            # nothing to do
+          elsif line =~ /\* (\d+) ([A-Z]+)/
+            block.call($2, $1.to_u32)
+          else
+            next false
+          end
+          true
+        end
       end
+    end
+
+    # Sends a DONE command
+    def done
+      command("DONE")
     end
 
     # Sends a SELECT command to select a +mailbox+ so that messages
@@ -166,7 +188,7 @@ module Imap
           end
         end
         if ip && from
-          @logger.info "from: #{from} ip: #{ip}"
+          @logger.debug "from: #{from} ip: #{ip}"
           from = nil
           ip = nil
         end
