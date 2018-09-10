@@ -4,6 +4,7 @@ require "logger"
 
 module Imap
   class Client
+    @caps : Set(String)
     @socket : TCPSocket | OpenSSL::SSL::Socket::Client | Nil = nil
     @logger : Logger
 
@@ -12,7 +13,6 @@ module Imap
       @logger.level = loglevel
       @mailboxes = [] of String
 
-      @command_history = [] of String
       @socket = TCPSocket.new(host, port)
       tls_socket = OpenSSL::SSL::Socket::Client.new(@socket.as(TCPSocket), sync_close: true, hostname: host)
       tls_socket.sync = false
@@ -20,6 +20,8 @@ module Imap
       login(username, password)
       # list headers
       # process_mail_headers(command("tag FETCH 1:#{count} (BODY[HEADER])"))
+
+      @caps = capability
     end
 
     private def socket
@@ -30,19 +32,58 @@ module Imap
       end
     end
 
-    private def command(command : String, *parameters)
+    private def command(command : String, *parameters, &block : String -> Bool)
       command_and_parameter = "tag #{command}"
       params = parameters.join(" ")
       command_and_parameter += " #{params}" if params && params.size > 0
-      @command_history << command_and_parameter
       @logger.info "=====> #{command_and_parameter}"
+
       socket << command_and_parameter << "\r\n"
       socket.flush
-      response
+
+      while (line = socket.gets)
+        break unless block.call(line)
+      end
+    end
+
+    private def command(command : String, *parameters) : Array(String)
+      res = [] of String
+
+      command(command, *parameters) do |line|
+        if line =~ /^\*/
+          res << line
+        elsif line =~ /^tag OK/
+          res << line
+          next false
+        elsif line =~ /^tag (BAD|NO)/
+          raise "Invalid responce \"#{line}\" received."
+        else
+          res << line
+        end
+        true
+      end
+
+      res
     end
 
     private def login(username, password)
       command("login", username, password)
+    end
+
+    # Sends a CAPABILITY command
+    def capability : Set(String)
+      result = command("CAPABILITY")
+      Set.new(result.first.split(" "))
+    end
+
+    # Sends an IDLE command,
+    #  raises exception if server doesn't support IDLE
+    def idle
+      raise "Server doesn't support IDLE" unless @caps.includes?("IDLE")
+      command("IDLE") do |line|
+        puts line
+        true
+      end
     end
 
     # Sends a SELECT command to select a +mailbox+ so that messages
@@ -71,7 +112,7 @@ module Imap
 
 
     # Returns an array of mailbox names
-    def list : Array(String)
+    def list : Set(String)
       mailboxes = [] of String
       res = command(%{LIST "" "*"})
       res.each do |line|
@@ -80,7 +121,8 @@ module Imap
           mailboxes << name[1].to_s if name
         end
       end
-      return mailboxes
+      # TODO: decode MIME encoded UTF-8 strings
+      return Set.new(mailboxes)
     end
 
     # Sends a STATUS command, and returns the status of the indicated
@@ -109,7 +151,7 @@ module Imap
       end
       return vals
     end
-    
+
     private def process_mail_headers(res)
       ip = nil
       from = nil
@@ -131,27 +173,10 @@ module Imap
       end
     end
 
-    private def response
-      status_messages = [] of String
-      while (line = socket.gets)
-        @command_history << line
-        if line =~ /^\*/
-          status_messages << line
-        elsif line =~ /^tag OK/
-          status_messages << line
-          break
-        elsif line =~ /^tag (BAD|NO)/
-          raise "Invalid responce \"#{line}\" received."
-        else
-          status_messages << line
-        end
-      end
-      status_messages
-    end
-
     # Closes the imap connection
     def close
-      command("LOGOUT")
+      command("LOGOUT") rescue nil
+      @socket.close
     end
   end
 end
