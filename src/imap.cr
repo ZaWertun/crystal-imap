@@ -12,12 +12,16 @@ module Imap
     @logger : Logger
     @idling = false
 
-    def initialize(host = "imap.gmail.com", port = 993, username = "", password = "", loglevel = Logger::ERROR)
+    def initialize(host = "imap.gmail.com", port = 993, username = "", password = "",
+                   loglevel = Logger::ERROR, verify = OpenSSL::SSL::VerifyMode::PEER)
       @logger = Logger.new(STDERR)
       @logger.level = loglevel
 
       @socket = TCPSocket.new(host, port)
-      tls_socket = OpenSSL::SSL::Socket::Client.new(@socket.as(TCPSocket), sync_close: true, hostname: host)
+      context = OpenSSL::SSL::Context::Client.new
+      context.verify_mode = verify
+      tls_socket = OpenSSL::SSL::Socket::Client.new(@socket.as(TCPSocket),
+                                                    context: context, sync_close: true, hostname: host)
       tls_socket.sync = false
       @socket = tls_socket
 
